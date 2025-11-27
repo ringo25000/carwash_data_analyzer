@@ -37,7 +37,7 @@ def get_max_page(page) -> int:
     #     }
     #     """
     # )
-    return int(2) #int(max_page or 1)
+    return int(1) #int(max_page or 1)
     # For testing only, you can temporarily do:
     # return 2
 

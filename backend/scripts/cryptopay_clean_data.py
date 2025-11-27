@@ -1,193 +1,174 @@
-# backend/scripts/cryptopay_clean_data.py
+# backend/scripts/load_transactions.py
 
 import json
-import re
-from datetime import datetime
 from pathlib import Path
 
-# --- Paths ---
+from app.db import get_connection, init_db
 
-BASE_DIR = Path(__file__).resolve().parents[1]   # backend/
-DATA_DIR = BASE_DIR / "data"
-RAW_JSON_PATH = DATA_DIR / "cryptopay_allData.json"
+ROOT_DIR = Path(__file__).resolve().parents[1]   # .../backend
+DATA_DIR = ROOT_DIR / "data"
 CLEAN_JSON_PATH = DATA_DIR / "cryptopay_cleaned.json"
+DELTA_JSON_PATH = DATA_DIR / "cryptopay_cleaned_delta.json"
 
 
-# --- Helper functions (cleaning only) ---
+def load_json(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found.")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"Expected a list in {path.name}")
+    return data
 
-def parse_datetime(dt_str: str) -> tuple[str, str]:
+
+def get_purchase_count() -> int:
     """
-    '11/26/2025, 9:32 PM' -> ('2025-11-26', '21:32:00')
+    Return how many rows exist in the Purchase table.
+    If the DB file is new, init_db() will create tables first.
     """
-    dt = datetime.strptime(dt_str, "%m/%d/%Y, %I:%M %p")
-    purchase_date = dt.date().isoformat()                      # 'YYYY-MM-DD'
-    purchase_time = dt.time().replace(microsecond=0).isoformat()  # 'HH:MM:SS'
-    return purchase_date, purchase_time
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM Purchase")
+        (count,) = cur.fetchone()
+    return int(count)
 
 
-def parse_cardholder(cardholder: str) -> tuple[str, str]:
+def build_rows(records):
     """
-    Assumes format: 'NAME (1234)' -> ('NAME', '1234')
-    Keeps last4 as a string to preserve leading zeros (e.g. '0420').
+    Build Purchase, VacuumPurchase, and WashBayPurchase rows
+    from a list of cleaned records (either full history or delta).
     """
-    name_part, last4_part = cardholder.split("(", 1)
-    cardholder_name = name_part.strip()
-    cardholder_last4 = last4_part.strip().strip(")")
-    return cardholder_name, cardholder_last4
+    purchase_rows = []
+    vacuum_rows = []
+    wash_bay_rows = []
 
+    for rec in records:
+        txid = int(rec["transaction_id"])
+        purchase_date = rec["purchase_date"]
+        purchase_time = rec["purchase_time"]
+        cardholder_name = rec.get("cardholder_name")
+        cardholder_last4 = rec.get("cardholder_last4")
+        total_amount = float(rec["total_amount"])
+        purchase_type = rec["purchase_type"]   # 'V' or 'W'
 
-def parse_money(money_str: str) -> float:
-    """
-    '$1.50' -> 1.50
-    '$3,200.75' -> 3200.75
-
-    Returned as float suitable for NUMERIC(4,2)-style storage in SQLite.
-    """
-    cleaned = money_str.replace("$", "").replace(",", "").strip()
-    value = float(cleaned)
-    return round(value, 2)
-
-
-def parse_details_text(details_text: str) -> dict:
-    """
-    Decide if this is a Vacuum or Wash Bay purchase from details_text,
-    and extract either:
-      - purchase_type = 'V', vacuum_number
-      - purchase_type = 'W', wash_bay_purchases (list of bay_number + wash_purchase_total)
-
-    Returns:
-      {
-        "purchase_type": "V",
-        "vacuum_number": 3
-      }
-
-    or:
-
-      {
-        "purchase_type": "W",
-        "wash_bay_purchases": [
-          {"bay_number": 5, "wash_purchase_total": 3.75},
-          ...
-        ]
-      }
-    """
-    lines = [line.strip() for line in details_text.splitlines() if line.strip()]
-
-    vac_lines = [ln for ln in lines if ln.startswith("Vac")]
-    bay_lines = [ln for ln in lines if ln.startswith("Wash Bay")]
-
-    # Vacuum purchase
-    if vac_lines:
-        # Example: 'Vac\t(vacuum 3)\t$1.50'
-        line = vac_lines[0]
-        parts = [p for p in line.split("\t") if p.strip()]
-
-        # e.g. '(vacuum 3)'
-        vacuum_part = next(p for p in parts if "vacuum" in p.lower())
-        vacuum_number = int(re.search(r"(\d+)", vacuum_part).group(1))
-
-        return {
-            "purchase_type": "V",
-            "vacuum_number": vacuum_number,
-        }
-
-    # Wash Bay purchase (can be 1 or more lines)
-    wash_bay_purchases: list[dict] = []
-
-    for line in bay_lines:
-        # Example: 'Wash Bay\t(bay 5)\t$3.75'
-        parts = [p for p in line.split("\t") if p.strip()]
-
-        # 1) Get bay_number from the whole line
-        #    Matches 'bay 5', '(bay 5)', 'bay   5', etc.
-        m = re.search(r"bay[^0-9]*([0-9]+)", line, re.IGNORECASE)
-        bay_number = int(m.group(1))
-
-        # 2) Get the money part from the split pieces
-        total_part = next(p for p in parts if "$" in p)
-        wash_purchase_total = parse_money(total_part)
-
-        wash_bay_purchases.append(
-            {
-                "bay_number": bay_number,
-                "wash_purchase_total": wash_purchase_total,
-            }
+        purchase_rows.append(
+            (
+                txid,
+                purchase_date,
+                purchase_time,
+                cardholder_name,
+                cardholder_last4,
+                total_amount,
+                purchase_type,
+            )
         )
 
-    return {
-        "purchase_type": "W",
-        "wash_bay_purchases": wash_bay_purchases,
-    }
+        if purchase_type == "V":
+            vacuum_number = rec["vacuum_number"]
+            if vacuum_number is None:
+                raise ValueError(f"Vacuum purchase with null vacuum_number (tx {txid})")
+            vacuum_rows.append((txid, int(vacuum_number)))
+
+        elif purchase_type == "W":
+            for line in rec.get("wash_bay_purchases", []):
+                bay_number = int(line["bay_number"])
+                wash_total = float(line["wash_purchase_total"])
+                wash_bay_rows.append((txid, bay_number, wash_total))
+
+        else:
+            raise ValueError(f"Unknown purchase_type: {purchase_type!r}")
+
+    return purchase_rows, vacuum_rows, wash_bay_rows
 
 
-def compute_total_amount(raw_total_str: str, details: dict) -> float:
+def insert_rows(purchase_rows, vacuum_rows, wash_bay_rows):
     """
-    Compute the overall total_amount for the Purchase record.
-
-    - For 'V' (vacuum): use the raw JSON total (parsed).
-    - For 'W' (Wash Bay): sum all wash_purchase_total values.
+    Insert the new rows into the DB.
+    We assume the caller only passes truly new transactions
+    (i.e., no duplicate transaction_ids).
     """
-    purchase_type = details["purchase_type"]
+    init_db()
 
-    if purchase_type == "V":
-        return parse_money(raw_total_str)
+    with get_connection() as conn:
+        cur = conn.cursor()
 
-    # For Wash Bay, sum all wash_purchase_total entries
-    wash_bay_purchases = details["wash_bay_purchases"]
-    total = sum(entry["wash_purchase_total"] for entry in wash_bay_purchases)
-    return round(total, 2)
+        if purchase_rows:
+            cur.executemany(
+                """
+                INSERT INTO Purchase (
+                    transaction_id,
+                    purchase_date,
+                    purchase_time,
+                    cardholder_name,
+                    cardholder_last4,
+                    total_amount,
+                    purchase_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                purchase_rows,
+            )
 
+        if vacuum_rows:
+            cur.executemany(
+                """
+                INSERT INTO VacuumPurchase (
+                    transaction_id,
+                    vacuum_number
+                ) VALUES (?, ?)
+                """,
+                vacuum_rows,
+            )
 
-def clean_record(raw: dict) -> dict:
-    """
-    Take one raw JSON entry from cryptopay_allData.json and
-    return a normalized dict ready for DB loading, with names
-    aligned to the schema.
-    """
-    transaction_id = int(raw["transaction_id"])
-    purchase_date, purchase_time = parse_datetime(raw["datetime"])
-    cardholder_name, cardholder_last4 = parse_cardholder(raw["cardholder"])
+        if wash_bay_rows:
+            cur.executemany(
+                """
+                INSERT INTO WashBayPurchase (
+                    transaction_id,
+                    bay_number,
+                    wash_purchase_total
+                ) VALUES (?, ?, ?)
+                """,
+                wash_bay_rows,
+            )
 
-    details = parse_details_text(raw["details_text"])
-    purchase_type = details["purchase_type"]
-
-    total_amount = compute_total_amount(raw["total"], details)
-
-    if purchase_type == "V":
-        vacuum_number = details["vacuum_number"]
-        wash_bay_purchases: list[dict] = []
-    else:  # 'W'
-        vacuum_number = None
-        wash_bay_purchases = details["wash_bay_purchases"]
-
-    return {
-        "transaction_id": transaction_id,
-        "purchase_date": purchase_date,
-        "purchase_time": purchase_time,
-        "cardholder_name": cardholder_name,
-        "cardholder_last4": cardholder_last4,         # string, preserves leading zeros
-        "total_amount": total_amount,
-        "purchase_type": purchase_type,               # 'V' or 'W'
-        "vacuum_number": vacuum_number,               # int or None
-        "wash_bay_purchases": wash_bay_purchases      # list of {bay_number, wash_purchase_total}
-    }
+        conn.commit()
 
 
 def main():
-    if not RAW_JSON_PATH.exists():
-        raise FileNotFoundError(f"{RAW_JSON_PATH} not found. Run cryptopay_scrape_data.py first.")
+    # 1) Check if DB has any data in Purchase
+    purchase_count = get_purchase_count()
+    print(f"Purchase table currently has {purchase_count} rows.")
 
-    with RAW_JSON_PATH.open("r", encoding="utf-8") as f:
-        raw_records = json.load(f)
+    # 2) Decide whether to use full cleaned file or delta
+    if purchase_count == 0:
+        # Initial load / reinitialized DB: use full cleaned history
+        print("Database is empty – loading full cleaned history.")
+        records = load_json(CLEAN_JSON_PATH)
+    else:
+        # Incremental update: use delta only
+        if not DELTA_JSON_PATH.exists():
+            print(f"No delta file found at {DELTA_JSON_PATH}; nothing to load.")
+            return
 
-    print(f"Loaded {len(raw_records)} raw records. Cleaning...")
+        records = load_json(DELTA_JSON_PATH)
+        if not records:
+            print("Delta file is empty – no new cleaned records to load into DB.")
+            return
 
-    cleaned_records = [clean_record(rec) for rec in raw_records]
+        print(f"Loading {len(records)} new cleaned records from delta file.")
 
-    with CLEAN_JSON_PATH.open("w", encoding="utf-8") as f:
-        json.dump(cleaned_records, f, indent=2)
+    # 3) Build rows and insert
+    purchase_rows, vacuum_rows, wash_bay_rows = build_rows(records)
 
-    print(f"Saved {len(cleaned_records)} cleaned records to {CLEAN_JSON_PATH}")
+    print("Prepared rows for insertion:")
+    print(f"  Purchase:       {len(purchase_rows)}")
+    print(f"  VacuumPurchase: {len(vacuum_rows)}")
+    print(f"  WashBayPurchase:{len(wash_bay_rows)}")
+
+    insert_rows(purchase_rows, vacuum_rows, wash_bay_rows)
+
+    print("Database update complete.")
 
 
 if __name__ == "__main__":

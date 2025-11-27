@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS Purchase (
     cardholder_name     TEXT NOT NULL,
     cardholder_last4    TEXT NOT NULL,       -- last 4 digits as text to preserve leading zeros
     total_amount        NUMERIC(4, 2) NOT NULL, -- behaves like DECIMAL(4,2) in SQLite
-    purchase_type       TEXT NOT NULL CHECK (purchase_type IN ('V', 'B'))
+    purchase_type       TEXT NOT NULL CHECK (purchase_type IN ('V', 'W'))
 );
 
 CREATE TABLE IF NOT EXISTS VacuumPurchase (

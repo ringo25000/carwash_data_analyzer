@@ -1,5 +1,3 @@
-# Load data into db
-
 # backend/scripts/load_transactions.py
 
 import json
@@ -8,29 +6,44 @@ from pathlib import Path
 # From the __init__ package we made for app/ db.py is a module named db
 from app.db import get_connection, init_db
 
-
 # Paths
 ROOT_DIR = Path(__file__).resolve().parents[1]   # .../backend
 DATA_DIR = ROOT_DIR / "data"
 CLEAN_JSON_PATH = DATA_DIR / "cryptopay_cleaned.json"
+DELTA_JSON_PATH = DATA_DIR / "cryptopay_cleaned_delta.json"  # <-- NEW
 
 
-def load_cleaned_json(json_path: Path = CLEAN_JSON_PATH):
-    """Read cleaned JSON file and return list of purchases."""
-    with json_path.open("r", encoding="utf-8") as f:
+def load_json(path: Path):
+    """Read a JSON file (full or delta) and return list of purchases."""
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found.")
+    with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, list):
-        raise ValueError("Expected top-level JSON list in cryptopay_cleaned.json")
+        raise ValueError(f"Expected top-level JSON list in {path.name}")
 
     return data
+
+
+def get_purchase_count() -> int:
+    """
+    Return how many rows exist in the Purchase table.
+    If the DB file is new, init_db() will create tables first.
+    """
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM Purchase")
+        (count,) = cur.fetchone()
+    return int(count)
 
 
 def build_rows(purchases):
     """
     Convert list of purchase dicts into rows for executemany.
 
-    JSON shape (from you):
+    JSON shape:
 
     {
       "transaction_id": 2085361712,
@@ -109,26 +122,27 @@ def insert_all(purchase_rows, vacuum_rows, wash_bay_rows):
         cur = conn.cursor()
 
         # --- Purchase table ---
-        cur.executemany(
-            """
-            INSERT OR REPLACE INTO Purchase (
-                transaction_id,
-                purchase_date,
-                purchase_time,
-                cardholder_name,
-                cardholder_last4,
-                total_amount,
-                purchase_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            purchase_rows,
-        )
+        if purchase_rows:
+            cur.executemany(
+                """
+                INSERT INTO Purchase (
+                    transaction_id,
+                    purchase_date,
+                    purchase_time,
+                    cardholder_name,
+                    cardholder_last4,
+                    total_amount,
+                    purchase_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                purchase_rows,
+            )
 
         # --- VacuumPurchase table ---
         if vacuum_rows:
             cur.executemany(
                 """
-                INSERT OR REPLACE INTO VacuumPurchase (
+                INSERT INTO VacuumPurchase (
                     transaction_id,
                     vacuum_number
                 ) VALUES (?, ?)
@@ -153,7 +167,29 @@ def insert_all(purchase_rows, vacuum_rows, wash_bay_rows):
 
 
 def main():
-    purchases = load_cleaned_json()
+    # 1) Check if DB has any data in Purchase
+    purchase_count = get_purchase_count()
+    print(f"Purchase table currently has {purchase_count} rows.")
+
+    # 2) Decide whether to use full cleaned file or delta
+    if purchase_count == 0:
+        # Initial load / reinitialized DB: use full cleaned history
+        print("Database is empty – loading full cleaned history.")
+        purchases = load_json(CLEAN_JSON_PATH)
+    else:
+        # Incremental update: use delta only
+        if not DELTA_JSON_PATH.exists():
+            print(f"No delta file found at {DELTA_JSON_PATH}; nothing to load.")
+            return
+
+        purchases = load_json(DELTA_JSON_PATH)
+        if not purchases:
+            print("Delta file is empty – no new cleaned records to load into DB.")
+            return
+
+        print(f"Loading {len(purchases)} new cleaned records from delta file.")
+
+    # 3) Build rows and insert
     purchase_rows, vacuum_rows, wash_bay_rows = build_rows(purchases)
 
     print(f"Prepared {len(purchase_rows)} Purchase rows")
@@ -161,7 +197,7 @@ def main():
     print(f"Prepared {len(wash_bay_rows)} WashBayPurchase rows")
 
     insert_all(purchase_rows, vacuum_rows, wash_bay_rows)
-    print("Done inserting into SQLite.")
+    print("Database update complete.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 # ignore json data files
-.db
+*.db
+*.json
 
 # ignore scraped data
-backend/data/

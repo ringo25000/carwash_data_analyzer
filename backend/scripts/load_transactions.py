@@ -1,4 +1,3 @@
-# JSON → SQLite script
-
+# Load data into db
 
 

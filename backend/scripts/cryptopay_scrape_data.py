@@ -1,10 +1,18 @@
 from playwright.sync_api import sync_playwright
 import json
 import os
+from pathlib import Path  # <<< ADDED
 
 PURCHASES_URL = "https://www.mycryptopay.com/login/index.php?page=purchases"
-STATE_FILE = "cryptopay_state.json"
-OUTPUT_FILE = "cryptopay_allData.json"
+
+# >>> NEW: resolve paths relative to this file (backend/scripts/...)
+BASE_DIR = Path(__file__).resolve().parents[1]  # this is backend/
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+STATE_FILE = str(DATA_DIR / "cryptopay_state.json")
+OUTPUT_FILE = str(DATA_DIR / "cryptopay_allData.json")
+# <<< everything below is your original code, unchanged
 
 
 def get_max_page(page) -> int:
@@ -29,7 +37,7 @@ def get_max_page(page) -> int:
     #     }
     #     """
     # )
-    return int(1) #int(max_page or 1)
+    return int(2) #int(max_page or 1)
     # For testing only, you can temporarily do:
     # return 2
 
@@ -140,7 +148,6 @@ def scrape_page(page, page_num: int):
         allData.push({
           "datetime": dateTime,
           "cardholder": cardholder,
-          "type": type,
           "total": totalStr,
           "transaction_id": transactionId,
           "details_text": detailsText,

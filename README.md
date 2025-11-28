@@ -27,8 +27,8 @@ python -m playwright install chromium
 
 
 
+### RUNNING PROJECT ###
 
-# RUNNING PROJECT
 # Run login Script
 python -m scripts.cryptopay_login
 

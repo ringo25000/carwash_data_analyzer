@@ -1,10 +1,9 @@
-How to setup and run this project:
+## Setup + Run (per machine)
 
-## Setup (per machine)
 
-1. Clone the repo
 
 ```bash
+# Clone Repo
 git clone <your-repo-url> carwash_data_analyzer
 cd carwash_data_analyzer
 

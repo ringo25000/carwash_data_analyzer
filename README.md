@@ -4,7 +4,7 @@
 
 ```bash
 # Clone Repo
-git clone <your-repo-url> carwash_data_analyzer
+git clone <repo_link> 
 cd carwash_data_analyzer
 
 

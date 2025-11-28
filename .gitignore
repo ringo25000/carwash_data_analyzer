@@ -8,4 +8,11 @@
 
 # ignore python cache files
 __pycache__/
+*/__pycache__/
+*/*/__pycache__/
+
+# compiled python files
+*.pyc
+*.pyo
+*.pyd
 

@@ -17,6 +17,8 @@ def load_json(path: Path):
     """Read a JSON file (full or delta) and return list of purchases."""
     if not path.exists():
         raise FileNotFoundError(f"{path} not found.")
+    # with ensures __enter__ and __exit__ are called properly. exit is called reguardless if it exists normally or with an exception.
+    # bascially it closes the file automatically for us. handles clean up. otherwise use a try and catch block. this is just cleaner.
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -27,6 +29,7 @@ def load_json(path: Path):
 
 
 def get_purchase_count() -> int:
+    
     """
     Return how many rows exist in the Purchase table.
     If the DB file is new, init_db() will create tables first.

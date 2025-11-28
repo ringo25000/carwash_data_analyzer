@@ -1,5 +1,11 @@
 # ignore json data files
-*.db
 *.json
 
-# ignore scraped data
+# ignore database files
+*.sqlite
+*.sqlite3
+*.db
+
+# ignore python cache files
+__pycache__/
+

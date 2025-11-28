@@ -2,22 +2,19 @@ How to setup and run this project:
 
 ## Setup (per machine)
 
-### 1. Clone the repo
+1. Clone the repo
 
 ```bash
 git clone <your-repo-url> carwash_data_analyzer
 cd carwash_data_analyzer
 
 
-
 # MAC
-
 python3 -m venv .venv
 source .venv/bin/activate
 
 
 # WINDOWS(POWERSHELL)
-
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
@@ -31,11 +28,11 @@ python -m playwright install chromium
 
 
 
-To run project
 
-Run login
-1) python -m scripts.cryptopay_login
+# RUNNING PROJECT
+# Run login Script
+python -m scripts.cryptopay_login
 
-Run the full ETL pipeline (scrape → clean → load DB)
-2) python -m app.pipeline
+# Run the full ETL pipeline (scrape → clean → load DB)
+python -m app.pipeline
 

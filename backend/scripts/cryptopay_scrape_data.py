@@ -1,18 +1,19 @@
+# backend/scripts/cryptopay_scrape_data.py
+
 from playwright.sync_api import sync_playwright
 import json
 import os
-from pathlib import Path  # <<< ADDED
+from pathlib import Path
 
 PURCHASES_URL = "https://www.mycryptopay.com/login/index.php?page=purchases"
 
-# >>> NEW: resolve paths relative to this file (backend/scripts/...)
+# Resolve paths relative to this file (backend/scripts/...)
 BASE_DIR = Path(__file__).resolve().parents[1]  # this is backend/
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 STATE_FILE = str(DATA_DIR / "cryptopay_state.json")
 OUTPUT_FILE = str(DATA_DIR / "cryptopay_allData.json")
-# <<< everything below is your original code, unchanged
 
 
 def get_max_page(page) -> int:
@@ -37,21 +38,26 @@ def get_max_page(page) -> int:
     #     }
     #     """
     # )
-    return int(1) #int(max_page or 1)
+    return int(1)  # int(max_page or 1)
     # For testing only, you can temporarily do:
     # return 2
 
 
-def scrape_page(page, page_num: int):
+def scrape_page(page, page_num: int, latest_txid: str | None = None):
     """
     Use the site's own JS functions to switch to page `page_num`,
-    then scrape that page's purchases and return a list of dicts.
-    For each entry, we keep checking until a non-empty transaction_id is found
-    (or we hit a max number of attempts).
+    then scrape that page's purchases and return:
+      { "data": [...entries...], "hitLatest": bool }
+
+    If latest_txid is provided, the browser JS will, for each row:
+      - expand it
+      - extract transactionId
+      - as soon as it sees transactionId == latest_txid,
+        it stops scraping further rows and returns what it has.
     """
     return page.evaluate(
         """
-    async (pageNum) => {
+    async ({ pageNum, latestTxId }) => {
       const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
       // Switch the internal 'pagenum' and reload purchases_inner, just like the span onclick
@@ -64,7 +70,7 @@ def scrape_page(page, page_num: int):
       // There may be multiple purchases tables if the site appends instead of replacing.
       // Always use the LAST one (the most recent page).
       const tables = document.querySelectorAll("table.purchases-table");
-      if (!tables.length) return [];
+      if (!tables.length) return { data: [], hitLatest: false };
       const purchasesTable = tables[tables.length - 1];
 
       const cells = Array.from(
@@ -72,6 +78,7 @@ def scrape_page(page, page_num: int):
       );
 
       const allData = [];
+      let hitLatest = false;
 
       for (const cell of cells) {
         const innerTable = cell.querySelector("table");
@@ -97,8 +104,9 @@ def scrape_page(page, page_num: int):
         let transactionId = "";
 
         // Keep polling until we see a non-empty Transaction ID or hit max attempts
-        for (let attempt = 0; attempt < 30 && !transactionId; attempt++) {
-          await sleep(200);  // 30 * 200ms = 6000ms max
+        // Slightly shorter window than before: 10 * 250ms = 2.5s max
+        for (let attempt = 0; attempt < 10 && !transactionId; attempt++) {
+          await sleep(250);
 
           // 1) Try inside same cell
           let detailsDiv = cell.querySelector("div[id^='transaction_pos_']");
@@ -152,12 +160,20 @@ def scrape_page(page, page_num: int):
           "transaction_id": transactionId,
           "details_text": detailsText,
         });
+
+        // Compare-as-we-scrape:
+        // If this row's transactionId matches the latest known txid,
+        // stop scraping the rest of the rows on this page.
+        if (latestTxId && transactionId === latestTxId) {
+          hitLatest = true;
+          break;
+        }
       }
 
-      return allData;
+      return { data: allData, hitLatest };
     }
     """,
-        page_num,
+        {"pageNum": page_num, "latestTxId": latest_txid},
     )
 
 
@@ -199,7 +215,8 @@ def scrape_all_data():
 
         for page_num in range(1, max_page + 1):
             print(f"Scraping page {page_num}/{max_page} ...")
-            page_data = scrape_page(page, page_num)
+            result = scrape_page(page, page_num, latest_txid=None)
+            page_data = result["data"]
             print(f"  -> {len(page_data)} purchases on page {page_num}")
             all_data.extend(page_data)
 
@@ -211,18 +228,23 @@ def incremental_update():
     """
     Incremental scrape:
     - Load existing JSON.
-    - Get the latest known transaction_id (from entries[0]).
-    - Scrape from page 1 onward, collecting new entries.
-    - As soon as we hit a row whose transaction_id matches the latest known one,
-      we stop (everything after is older).
-    - Use known_keys as a safety net against accidental duplicates.
+    - If it's empty, fall back to a full scrape.
+    - Otherwise:
+        - Grab latest_txid from the first existing entry.
+        - Scrape from page 1 onward, collecting new entries.
+        - As soon as the browser hits latest_txid while scraping rows,
+          it stops scraping further rows, and we stop paging.
+        - known_keys is used as a safety net against accidental duplicates.
     """
     existing_entries = load_existing_entries()
     print(f"Loaded {len(existing_entries)} existing entries.")
 
-    latest_txid = None
-    if existing_entries:
-        latest_txid = (existing_entries[0].get("transaction_id") or "").strip() or None
+    # If file exists but is empty, just do a full scrape.
+    if not existing_entries:
+        print("Existing data file has no entries – running full scrape instead.")
+        return scrape_all_data()
+
+    latest_txid = (existing_entries[0].get("transaction_id") or "").strip() or None
     print(f"Latest known transaction_id: {latest_txid!r}")
 
     known_keys = {make_key(e) for e in existing_entries}
@@ -244,13 +266,15 @@ def incremental_update():
                 break
 
             print(f"Scraping page {page_num}/{max_page} ...")
-            page_data = scrape_page(page, page_num)
+            result = scrape_page(page, page_num, latest_txid)
+            page_data = result["data"]
+            page_hit_latest = result["hitLatest"]
             print(f"  -> {len(page_data)} purchases on page {page_num}")
 
             for entry in page_data:
                 txid = (entry.get("transaction_id") or "").strip()
 
-                # If we’ve reached the last known transaction, stop.
+                # Safety: if we see the latest_txid here, mark boundary
                 if latest_txid and txid == latest_txid:
                     print("Hit latest known transaction_id – stopping incremental scrape.")
                     hit_boundary = True
@@ -263,6 +287,10 @@ def incremental_update():
                 known_keys.add(key)
                 new_entries.append(entry)
 
+            if page_hit_latest:
+                # JS already stopped this page because it hit the known txid
+                hit_boundary = True
+
         browser.close()
 
     if new_entries:
@@ -274,7 +302,6 @@ def incremental_update():
         all_entries = existing_entries
 
     return all_entries
-
 
 
 if __name__ == "__main__":
